@@ -14,6 +14,9 @@
     container_name: service_torrent_service
     build:
       context: ./services/torrent_service
+      args:
+        # Kerberos SSO: cargo feature sso (libgssapi)
+        CARGO_FEATURES: "sso"
     environment:
       - TZ=${TZ:-Europe/Moscow}
       - PORT=${TORRENT_HTTP_PORT:-8280}
@@ -24,6 +27,18 @@
       - AD_URL=ldap://service_samba_addc:389
       - AD_DOMAIN=${AD_REALM:-HOME.ARPA}
       - SECRET=${SECRET:?Set SECRET in .env (openssl rand -hex 32)}
+      # --- Kerberos SSO ---
+      # Доменные машины с тикетом входят без пароля (SPNEGO).
+      # На DC один раз:
+      #   samba-tool spn add HTTP/torrentsvc torrentsvc   (или существующая учётка)
+      #   samba-tool domain exportkeytab /path/to/torrent.keytab --principal=HTTP/torrentsvc
+      # и положить keytab в ./folders/torrent_service/keytab/torrent.keytab
+      # (kdc-хост берётся из AD_URL, krb5.conf генерится в /state при старте)
+      - SSO_ENABLED=${SSO_ENABLED:-true}
+      - SSO_SPN=${SSO_SPN:-}
+      - KRB5_KTNAME=FILE:/keytab/torrent.keytab
+      - SEED_RATIO_LIMIT=${SEED_RATIO_LIMIT:-0}
+      - SEED_TIME_MINUTES=${SEED_TIME_MINUTES:-0}
     depends_on:
       service_samba_addc:
         condition: service_healthy
@@ -36,3 +51,4 @@
     volumes:
       - ./folders/torrent_service/downloads:/downloads
       - ./folders/torrent_service/state:/state
+      - ./folders/torrent_service/keytab:/keytab:ro

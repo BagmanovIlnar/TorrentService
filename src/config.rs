@@ -19,6 +19,14 @@ pub struct Config {
     pub local_users: Vec<(String, String)>,
     /// Секрет для HMAC-кук. None = сгенерировать при первом старте и сохранить.
     pub secret: Option<Vec<u8>>,
+    /// Kerberos SSO (feature "sso"): Authorization: Negotiate -> кука
+    pub sso_enabled: bool,
+    /// SPN сервис-принципала (HTTP/nas.home.arpa@REALM). None = Cred::acquire(default)
+    pub sso_spn: Option<String>,
+    /// Сидировать пока ratio не достигнет N (0 = без лимита)
+    pub seed_ratio_limit: f64,
+    /// Сидировать не дольше N минут после завершения (0 = без лимита)
+    pub seed_time_minutes: u64,
 }
 
 fn env_or(name: &str, default: &str) -> String {
@@ -53,6 +61,10 @@ impl Config {
             ad_domain: env_or("AD_DOMAIN", "HOME.ARPA"),
             local_users: parse_local_users(&env_or("LOCAL_USERS", "")),
             secret,
+            sso_enabled: env_or("SSO_ENABLED", "false") == "true",
+            sso_spn: env::var("SSO_SPN").ok().filter(|s| !s.is_empty()),
+            seed_ratio_limit: env_or("SEED_RATIO_LIMIT", "0").parse()?,
+            seed_time_minutes: env_or("SEED_TIME_MINUTES", "0").parse()?,
         })
     }
 }

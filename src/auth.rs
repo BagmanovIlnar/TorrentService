@@ -24,6 +24,7 @@ pub struct AuthState {
     pub mode: AuthMode,
     pub ad_url: String,
     pub ad_domain: String,
+    pub sso_spn: Option<String>,
 }
 
 /// Имя пользователя из куки. Вставляется middleware, хендлеры берут экстрактором.
@@ -97,12 +98,29 @@ fn cookie_value(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
         .map(|(_, v)| v.to_string())
 }
 
-/// middleware: кладёт CurrentUser в extensions или отдаёт 401.
+/// middleware: Kerberos Negotiate (если сработал) -> кука; иначе кука SID; иначе 401.
 pub async fn require_auth(
     State(auth): State<AuthState>,
     req: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    // 1) SPNEGO: браузер с керберос-тикетом повторит запрос сам после 401 + WWW-Authenticate
+    if let Some(neg) = negotiate_token(req.headers()) {
+        if let Some(user) = crate::sso::accept(&neg, auth.sso_spn.as_deref()) {
+            let token = make_token(&auth.secret, &user);
+            let cookie = format!(
+                "{COOKIE_NAME}={token}; Max-Age={TTL_SECS}; Path=/; HttpOnly; SameSite=Lax"
+            );
+            let mut req = req;
+            req.extensions_mut().insert(CurrentUser(user));
+            let mut resp = next.run(req).await;
+            if let Ok(v) = HeaderValue::from_str(&cookie) {
+                resp.headers_mut().insert(header::SET_COOKIE, v);
+            }
+            return resp;
+        }
+    }
+    // 2) обычная кука
     let user = cookie_value(req.headers(), COOKIE_NAME).and_then(|v| verify_token(&auth.secret, &v));
     match user {
         Some(u) => {
@@ -110,8 +128,26 @@ pub async fn require_auth(
             req.extensions_mut().insert(CurrentUser(u));
             next.run(req).await
         }
-        None => StatusCode::UNAUTHORIZED.into_response(),
+        None => {
+            // предлагаем браузеру Negotiate (домашние машины с тикетом зайдут без пароля)
+            let mut resp = StatusCode::UNAUTHORIZED.into_response();
+            resp.headers_mut().insert(
+                header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Negotiate"),
+            );
+            resp
+        }
     }
+}
+
+fn negotiate_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Negotiate ")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]

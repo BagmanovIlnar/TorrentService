@@ -1,13 +1,17 @@
 FROM rust:1-bookworm AS build
 WORKDIR /src
+# CARGO_FEATURES: "sso" для Kerberos SSO (нужны krb5-заголовки)
+ARG CARGO_FEATURES=""
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo build --release
+RUN if [ -n "$CARGO_FEATURES" ]; then cargo build --release --features "$CARGO_FEATURES"; \
+    else cargo build --release; fi
 
 FROM debian:bookworm-slim
-# curl — только ради healthcheck; ca-certificates — для https-трекеров
+# curl — healthcheck; ca-certificates — https-трекеры;
+# libgssapi-krb5-2 — SPNEGO/Kerberos (нужен при CARGO_FEATURES=sso, но безопасен и без)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && apt-get install -y --no-install-recommends curl ca-certificates libgssapi-krb5-2 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/target/release/torrent-service /app/torrent-service
 COPY static /app/static

@@ -16,6 +16,10 @@ services:
       - AD_URL=${AD_URL:-}
       - AD_DOMAIN=${AD_DOMAIN:-HOME.ARPA}
       - SECRET=${SECRET:?Set SECRET in .env (openssl rand -hex 32)}
+      - SSO_ENABLED=${SSO_ENABLED:-false}
+      - SSO_SPN=${SSO_SPN:-}
+      - SEED_RATIO_LIMIT=${SEED_RATIO_LIMIT:-0}
+      - SEED_TIME_MINUTES=${SEED_TIME_MINUTES:-0}
     ports:
       - "${TORRENT_HTTP_PORT:-8280}:8280"   # HTTP (8080 занят qbittorrent)
       - "${TORRENT_BT_PORT:-6882}:6882"     # BitTorrent TCP (6881 занят qbittorrent)

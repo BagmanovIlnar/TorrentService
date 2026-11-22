@@ -4,6 +4,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+pub const USER_RUNNING: &str = "running";
+pub const USER_PAUSED: &str = "paused";
+
 /// Всё наше сохранённое состояние. librqbit сам восстанавливает торренты
 /// (SessionPersistenceConfig::Json), здесь только то, чего он не знает:
 /// владельцы (подписчики), категории, локальные пользователи, секрет.
@@ -32,6 +35,13 @@ pub struct TorrentRec {
     pub subscribers: Vec<String>,
     pub added_at: u64,
     pub completed_at: Option<u64>,
+    /// per-user пауза: юзер -> "running"|"paused". Движок ставится на паузу,
+    /// только когда паузу хотят ВСЕ подписчики.
+    #[serde(default)]
+    pub user_states: HashMap<String, String>,
+    /// сид-лимит сработал: причина ("ratio"|"time"). Снимается resume'ом.
+    #[serde(default)]
+    pub seeding_paused: Option<String>,
 }
 
 /// ponytail: нет fsync — write-to-temp + rename; потеря state.json при пропадании
@@ -101,6 +111,10 @@ pub fn subscribe(p: &mut Persisted, hash: &str, rec: TorrentRec, user: &str) -> 
         Some(existing) => {
             if !existing.subscribers.iter().any(|s| s == user) {
                 existing.subscribers.push(user.to_string());
+                // новый подписчик по умолчанию хочет качать
+                existing
+                    .user_states
+                    .insert(user.to_string(), USER_RUNNING.to_string());
             }
             false
         }
@@ -111,13 +125,42 @@ pub fn subscribe(p: &mut Persisted, hash: &str, rec: TorrentRec, user: &str) -> 
     }
 }
 
-/// Отписка. true = последний подписчик ушёл, торрент можно удалять физически.
+/// Per-user пауза. true = движку нужно поставить паузу (паузу хотят все).
+pub fn user_pause(p: &mut Persisted, hash: &str, user: &str) -> bool {
+    if let Some(rec) = p.torrents.get_mut(hash) {
+        rec.user_states.insert(user.to_string(), USER_PAUSED.to_string());
+        desired_running(rec)
+    } else {
+        true
+    }
+}
+
+/// Per-user resume. true = движку надо снять паузу (есть хоть один желающий).
+pub fn user_resume(p: &mut Persisted, hash: &str, user: &str) -> bool {
+    if let Some(rec) = p.torrents.get_mut(hash) {
+        rec.user_states.insert(user.to_string(), USER_RUNNING.to_string());
+        rec.seeding_paused = None; // ручной resume перекрывает сработавший лимит
+        desired_running(rec)
+    } else {
+        true
+    }
+}
+
+/// Общее желаемое состояние: работает, если ХОТЬ ОДИН подписчик хочет.
+fn desired_running(rec: &TorrentRec) -> bool {
+    rec.subscribers
+        .iter()
+        .any(|s| rec.user_states.get(s).map(|v| v == USER_RUNNING).unwrap_or(true))
+}
+
+/// Отписка. true = ещё есть подписчики (торрент живёт).
 pub fn unsubscribe(p: &mut Persisted, hash: &str, user: &str) -> bool {
     let empty = if let Some(rec) = p.torrents.get_mut(hash) {
         rec.subscribers.retain(|s| s != user);
+        rec.user_states.remove(user);
         rec.subscribers.is_empty()
     } else {
-        return true;
+        return false;
     };
     if empty {
         p.torrents.remove(hash);
@@ -175,6 +218,8 @@ mod tests {
                 subscribers: vec!["u".into()],
                 added_at: 0,
                 completed_at: None,
+                user_states: HashMap::new(),
+                seeding_paused: None,
             },
         );
         assert!(category_delete(&mut s, "u", "movies/action"));
@@ -199,6 +244,8 @@ mod tests {
             subscribers: subs.iter().map(|s| s.to_string()).collect(),
             added_at: 0,
             completed_at: None,
+            user_states: HashMap::new(),
+            seeding_paused: None,
         };
         assert!(subscribe(&mut s, "h", rec(vec!["a"]), "a"));
         assert!(!subscribe(&mut s, "h", rec(vec![]), "b")); // дедуп: второй юзер
@@ -207,5 +254,34 @@ mod tests {
         assert!(s.torrents.contains_key("h"));
         assert!(!unsubscribe(&mut s, "h", "b")); // последний — можно удалять
         assert!(!s.torrents.contains_key("h"));
+    }
+
+    #[test]
+    fn per_user_pause_engine_only_when_all_paused() {
+        let mut s = p();
+        let rec = |subs: Vec<&str>| TorrentRec {
+            id: 1,
+            category: None,
+            subscribers: subs.iter().map(|s| s.to_string()).collect(),
+            added_at: 0,
+            completed_at: None,
+            user_states: HashMap::new(),
+            seeding_paused: None,
+        };
+        subscribe(&mut s, "h", rec(vec!["a"]), "a");
+        subscribe(&mut s, "h", rec(vec![]), "b");
+        // a ставит паузу — b хочет работать: движок НЕ на паузе
+        assert!(user_pause(&mut s, "h", "a"));
+        // b тоже — теперь все на паузе: движку пауза
+        assert!(!user_pause(&mut s, "h", "b"));
+        // a снял — движок снова работает
+        assert!(user_resume(&mut s, "h", "a"));
+        // новый подписчик по умолчанию running -> тоже работает
+        subscribe(&mut s, "h", rec(vec![]), "c");
+        assert_eq!(s.torrents["h"].user_states["c"], USER_RUNNING);
+        // resume снимает сработавший сид-лимит
+        s.torrents.get_mut("h").unwrap().seeding_paused = Some("ratio".into());
+        user_resume(&mut s, "h", "b");
+        assert_eq!(s.torrents["h"].seeding_paused, None);
     }
 }

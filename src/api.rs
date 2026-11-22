@@ -134,6 +134,8 @@ pub async fn post_torrents(
                     .unwrap()
                     .as_secs(),
                 completed_at: None,
+                user_states: std::collections::HashMap::new(),
+                seeding_paused: None,
             },
             &user.0,
         );
@@ -141,7 +143,7 @@ pub async fn post_torrents(
         state::save(&app.persist_dir(), &p).ok();
         app.session
             .get(id.into())
-            .map(|t| crate::torrent::build_info(&hash, &rec, &t))
+            .map(|t| crate::torrent::build_info(&hash, &rec, &t, Some(&user.0)))
     };
     match info {
         Some(i) => Json(i).into_response(),
@@ -202,6 +204,8 @@ pub async fn post_torrent_file(
                     .unwrap()
                     .as_secs(),
                 completed_at: None,
+                user_states: std::collections::HashMap::new(),
+                seeding_paused: None,
             },
             &user.0,
         );
@@ -209,7 +213,7 @@ pub async fn post_torrent_file(
         state::save(&app.persist_dir(), &p).ok();
         app.session
             .get(id.into())
-            .map(|t| crate::torrent::build_info(&hash, &rec, &t))
+            .map(|t| crate::torrent::build_info(&hash, &rec, &t, Some(&user.0)))
     };
     match info {
         Some(i) => Json(i).into_response(),
@@ -250,36 +254,50 @@ pub async fn delete_torrent(
     StatusCode::OK.into_response()
 }
 
-/// POST /torrents/{hash}/pause
+/// POST /torrents/{hash}/pause — персональная пауза: движок встаёт на паузу,
+/// только если паузу захотели ВСЕ подписчики.
 #[utoipa::path(post, path = "/torrents/{hash}/pause", responses((status = 200), (status = 404)))]
 pub async fn post_pause(
     user: CurrentUser,
     State(app): State<App>,
     Path(hash): Path<String>,
 ) -> Response {
-    match own_torrent(&app, &user.0, &hash) {
-        Some((rec, _)) => match crate::torrent::pause(&app.session, rec.id).await {
-            Ok(_) => StatusCode::OK.into_response(),
-            Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-        },
-        None => StatusCode::NOT_FOUND.into_response(),
+    let Some((rec, _)) = own_torrent(&app, &user.0, &hash) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let desired_running = {
+        let mut p = app.persist.lock().unwrap();
+        let d = state::user_pause(&mut p, &hash, &user.0);
+        state::save(&app.persist_dir(), &p).ok();
+        d
+    };
+    if !desired_running {
+        crate::torrent::pause(&app.session, rec.id).await.ok();
     }
+    StatusCode::OK.into_response()
 }
 
-/// POST /torrents/{hash}/resume
+/// POST /torrents/{hash}/resume — снимает вашу паузу и сработавший сид-лимит;
+/// движок оживает, если есть хоть один желающий качать.
 #[utoipa::path(post, path = "/torrents/{hash}/resume", responses((status = 200), (status = 404)))]
 pub async fn post_resume(
     user: CurrentUser,
     State(app): State<App>,
     Path(hash): Path<String>,
 ) -> Response {
-    match own_torrent(&app, &user.0, &hash) {
-        Some((rec, _)) => match crate::torrent::resume(&app.session, rec.id).await {
-            Ok(_) => StatusCode::OK.into_response(),
-            Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
-        },
-        None => StatusCode::NOT_FOUND.into_response(),
+    let Some((rec, _)) = own_torrent(&app, &user.0, &hash) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let desired_running = {
+        let mut p = app.persist.lock().unwrap();
+        let d = state::user_resume(&mut p, &hash, &user.0);
+        state::save(&app.persist_dir(), &p).ok();
+        d
+    };
+    if desired_running {
+        crate::torrent::resume(&app.session, rec.id).await.ok();
     }
+    StatusCode::OK.into_response()
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -288,16 +306,17 @@ pub struct SetCategoryReq {
     pub category: Option<String>,
 }
 
-/// POST /torrents/{hash}/category — меняет только метку.
+/// POST /torrents/{hash}/category — смена категории с перемещением файлов.
+/// Завершённые: файлы переносятся физически. Качающиеся: 409.
 #[utoipa::path(post, path = "/torrents/{hash}/category", request_body = SetCategoryReq,
-    responses((status = 200), (status = 403), (status = 404)))]
+    responses((status = 200), (status = 403), (status = 404), (status = 409)))]
 pub async fn post_category(
     user: CurrentUser,
     State(app): State<App>,
     Path(hash): Path<String>,
     Json(req): Json<SetCategoryReq>,
 ) -> Response {
-    let Some(_) = own_torrent(&app, &user.0, &hash) else {
+    let Some((rec, t)) = own_torrent(&app, &user.0, &hash) else {
         return StatusCode::NOT_FOUND.into_response();
     };
     if let Some(c) = &req.category {
@@ -307,15 +326,37 @@ pub async fn post_category(
             .unwrap()
             .categories
             .get(&user.0)
-            .map(|list| list.contains(&c))
+            .map(|list| list.contains(c))
             .unwrap_or(false);
         if !owned {
             return (StatusCode::FORBIDDEN, "no such category").into_response();
         }
     }
+    // перенос файлов — только для завершённых: качающийся пишет в старые пути
+    let stats = t.stats();
+    if !stats.finished && stats.progress_bytes < stats.total_bytes {
+        return (
+            StatusCode::CONFLICT,
+            "торрент ещё качается: перенос файлов возможен после завершения",
+        )
+            .into_response();
+    }
+    let old_dir = match &rec.category {
+        Some(c) => app.downloads_dir.join(c),
+        None => app.downloads_dir.clone(),
+    };
+    let new_dir = match &req.category {
+        Some(c) => app.downloads_dir.join(c),
+        None => app.downloads_dir.clone(),
+    };
+    if old_dir != new_dir {
+        if let Err(e) = crate::torrent::move_torrent_files(&t, &old_dir, &new_dir) {
+            return (StatusCode::CONFLICT, e.to_string()).into_response();
+        }
+    }
     let mut p = app.persist.lock().unwrap();
-    if let Some(rec) = p.torrents.get_mut(&hash) {
-        rec.category = req.category;
+    if let Some(r) = p.torrents.get_mut(&hash) {
+        r.category = req.category;
     }
     state::save(&app.persist_dir(), &p).ok();
     StatusCode::OK.into_response()

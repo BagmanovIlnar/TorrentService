@@ -1,3 +1,4 @@
+use crate::api::App;
 use crate::config::Config;
 use crate::state::{Persisted, TorrentRec};
 use librqbit::{
@@ -52,6 +53,69 @@ pub struct TorrentInfo {
     pub error: Option<String>,
     pub added_at: u64,
     pub completed_at: Option<u64>,
+    /// текущий юзер поставил персональную паузу (движок при этом может работать для других)
+    pub user_paused: bool,
+    /// сработал сид-лимит: "ratio" | "time"
+    pub seeding_paused: Option<String>,
+}
+
+/// Сид-лимиты: для завершённых торрентов ratio >= N или время сидирования >= M
+/// -> пауза движка (файлы остаются). Лимит снимается ручным resume.
+pub async fn enforce_seed_limits(app: &App, ratio_limit: f64, time_minutes: u64) {
+    if ratio_limit <= 0.0 && time_minutes <= 0 {
+        return;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut to_stop: Vec<(usize, String)> = Vec::new();
+    {
+        let p = app.persist.lock().unwrap();
+        for (hash, rec) in &p.torrents {
+            if rec.seeding_paused.is_some() || rec.completed_at.is_none() {
+                continue; // уже остановлен или ещё качается
+            }
+            let Some(t) = app.session.get(rec.id.into()) else { continue };
+            let stats = t.stats();
+            let progress = if stats.total_bytes > 0 {
+                stats.progress_bytes as f64 / stats.total_bytes as f64
+            } else {
+                0.0
+            };
+            if !stats.finished && progress < 1.0 {
+                continue;
+            }
+            let ratio = stats.uploaded_bytes as f64 / stats.total_bytes.max(1) as f64;
+            let seeded_min = now.saturating_sub(rec.completed_at.unwrap_or(now)) / 60;
+            let mut reason: Option<String> = None;
+            if ratio_limit > 0.0 && ratio >= ratio_limit {
+                reason = Some("ratio".into());
+            } else if time_minutes > 0 && seeded_min >= time_minutes {
+                reason = Some("time".into());
+            }
+            if let Some(r) = reason {
+                tracing::info!("seed limit ({r}) hit: {hash}");
+                to_stop.push((rec.id, r));
+                let _ = hash;
+            }
+        }
+    }
+    if to_stop.is_empty() {
+        return;
+    }
+    {
+        let mut p = app.persist.lock().unwrap();
+        for (id, reason) in &to_stop {
+            if let Some(rec) = p.torrents.values_mut().find(|r| r.id == *id) {
+                rec.seeding_paused = Some(reason.clone());
+            }
+        }
+        crate::state::save(&app.persist_dir(), &p).ok();
+    } // guard умер до любого await
+    for (id, _) in to_stop {
+        crate::torrent::pause(&app.session, id).await.ok();
+    }
 }
 
 /// Добавить magnet или .torrent-байты. Дедуп внутри librqbit: AlreadyManaged
@@ -111,6 +175,7 @@ pub fn list_user(
     user: &str,
     category_filter: Option<&str>,
 ) -> (Vec<TorrentInfo>, Vec<String>) {
+    let _viewer = user; // передаётся в build_info ниже
     let mut out = Vec::new();
     let mut newly_finished = Vec::new();
     for (hash, rec) in &persist.torrents {
@@ -125,7 +190,7 @@ pub fn list_user(
         let Some(t) = session.get(rec.id.into()) else {
             continue; // в state есть, в сессии нет: торрент добавили в этом старте? нет — пропускаем
         };
-        let info = build_info(hash, rec, &t);
+        let info = build_info(hash, rec, &t, Some(user));
         if info.status == "seeding" && rec.completed_at.is_none() {
             newly_finished.push(hash.clone());
         }
@@ -135,7 +200,7 @@ pub fn list_user(
     (out, newly_finished)
 }
 
-pub fn build_info(hash: &str, rec: &TorrentRec, t: &ManagedTorrent) -> TorrentInfo {
+pub fn build_info(hash: &str, rec: &TorrentRec, t: &ManagedTorrent, viewer: Option<&str>) -> TorrentInfo {
     let stats = t.stats();
     let name = t.name().unwrap_or_else(|| hash[..12].to_string());
     let progress = if stats.total_bytes > 0 {
@@ -185,5 +250,56 @@ pub fn build_info(hash: &str, rec: &TorrentRec, t: &ManagedTorrent) -> TorrentIn
         error: stats.error,
         added_at: rec.added_at,
         completed_at: rec.completed_at,
+        user_paused: viewer
+            .map(|u| {
+                rec.user_states.get(u).map(|v| v == crate::state::USER_PAUSED).unwrap_or(false)
+            })
+            .unwrap_or(false),
+        seeding_paused: rec.seeding_paused.clone(),
     }
+}
+
+/// Перенос файлов торрента в новую категорию (только для завершённых:
+/// качающийся торрент пишет в старые пути, двигать его нельзя).
+/// Возвращает перенесённые файлы; пустые каталоги в старом месте подчищаются.
+pub fn move_torrent_files(
+    t: &ManagedTorrent,
+    old_dir: &Path,
+    new_dir: &Path,
+) -> anyhow::Result<usize> {
+    let rels: Vec<std::path::PathBuf> = t
+        .with_metadata(|m| m.file_infos.iter().map(|f| f.relative_filename.clone()).collect())?;
+    tracing::info!("move: {} files, rels={:?}", rels.len(), rels.first());
+    anyhow::ensure!(!rels.is_empty(), "no file info yet");
+    std::fs::create_dir_all(new_dir)?;
+    let mut moved = 0;
+    for rel in &rels {
+        let from = old_dir.join(rel);
+        let to = new_dir.join(rel);
+        if !from.exists() {
+            continue;
+        }
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if std::fs::rename(&from, &to).is_err() {
+            // на всякий случай копия+удаление (разные тома)
+            std::fs::copy(&from, &to)?;
+            std::fs::remove_file(&from)?;
+        }
+        moved += 1;
+    }
+    // подчистить опустевшие каталоги в старом месте (не тронем чужие файлы:
+    // remove_dir удаляет только пустые)
+    let mut d = rels
+        .first()
+        .and_then(|r| old_dir.join(r).parent().map(|p| p.to_path_buf()));
+    while let Some(dir) = d {
+        // remove_dir удаляет только пустые каталоги — чужие файлы не тронет
+        if !std::fs::remove_dir(&dir).is_ok() {
+            break;
+        }
+        d = dir.parent().map(|p| p.to_path_buf());
+    }
+    Ok(moved)
 }

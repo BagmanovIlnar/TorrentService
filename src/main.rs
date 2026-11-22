@@ -3,6 +3,7 @@ mod auth;
 mod compat;
 mod config;
 mod files;
+mod sso;
 mod state;
 mod torrent;
 
@@ -60,14 +61,32 @@ async fn main() -> anyhow::Result<()> {
         mode: cfg.auth_mode.clone(),
         ad_url: cfg.ad_url.clone(),
         ad_domain: cfg.ad_domain.clone(),
+        sso_spn: cfg.sso_spn.clone(),
     };
+    let persist_arc = Arc::new(std::sync::Mutex::new(persist));
     let app_state = api::App {
         session,
-        persist: Arc::new(std::sync::Mutex::new(persist)),
+        persist: persist_arc.clone(),
         downloads_dir: cfg.downloads_dir.clone(),
         persist_dir: cfg.persist_dir.clone(),
         auth: auth_state.clone(),
     };
+    if cfg.sso_enabled {
+        sso::setup_krb5(&cfg.ad_domain, &cfg.ad_url, &cfg.persist_dir);
+    }
+    // сид-лимиты: раз в минуту
+    {
+        let app = app_state.clone();
+        let ratio = cfg.seed_ratio_limit;
+        let time_min = cfg.seed_time_minutes;
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                crate::torrent::enforce_seed_limits(&app, ratio, time_min).await;
+            }
+        });
+    }
 
     let app = Router::new()
         .route("/torrents", get(api::get_torrents).post(api::post_torrents))

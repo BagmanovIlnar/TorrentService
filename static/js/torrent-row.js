@@ -10,6 +10,7 @@ tpl.innerHTML = `
   .status.seeding { background: #1d3a2a; color: var(--ok); }
   .status.paused { background: #3a3324; color: var(--warn); }
   .status.error { background: #452323; color: var(--err); }
+  .status.limit { background: #2d2440; color: #b48cff; }
   .bar { width: 140px; height: 6px; background: var(--panel2); border-radius: 3px; overflow: hidden; }
   .bar > div { height: 100%; background: var(--accent); }
   .num { font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
@@ -64,8 +65,13 @@ class TorrentRow extends HTMLElement {
     this.shadowRoot.querySelector('.name').innerHTML =
       `${t.name}<br><span class="cat">${t.category ?? ''}${t.error ? ' — ' + t.error : ''}</span>`;
     const st = this.shadowRoot.querySelector('.status');
-    st.textContent = STATUS_RU[t.status] ?? t.status;
-    st.className = `status ${t.status}`;
+    if (t.seeding_paused) {
+      st.textContent = t.seeding_paused === 'ratio' ? 'лимит ратио' : 'лимит времени';
+      st.className = 'status limit';
+    } else {
+      st.textContent = (STATUS_RU[t.status] ?? t.status) + (t.user_paused ? ' (для вас)' : '');
+      st.className = `status ${t.status}`;
+    }
     this.shadowRoot.querySelector('.bar > div').style.width = `${(t.progress * 100).toFixed(1)}%`;
     this.shadowRoot.querySelector('.pct').textContent = `${(t.progress * 100).toFixed(1)}%`;
     this.shadowRoot.querySelector('.dls').textContent = `↓ ${fmtSize(t.down_speed)}/с`;
@@ -79,10 +85,12 @@ class TorrentRow extends HTMLElement {
     this.shadowRoot.querySelector('.added').textContent =
       new Date(t.added_at * 1000).toLocaleDateString();
     this.shadowRoot.querySelector('.subs').textContent = t.subscribers.join(', ');
-    this.shadowRoot.querySelector('.pause').textContent = t.status === 'paused' ? '▶' : '⏸';
+    // кнопка — про ПЕРСОНАЛЬНУЮ паузу: движение остановится, когда паузу захотят все
+    const pausedForMe = t.user_paused || t.seeding_paused;
+    this.shadowRoot.querySelector('.pause').textContent = pausedForMe ? '▶' : '⏸';
     this.shadowRoot.querySelector('.pause').onclick = () =>
       document.dispatchEvent(new CustomEvent('torrent-action', {
-        detail: { action: t.status === 'paused' ? 'resume' : 'pause', hash: t.hash },
+        detail: { action: pausedForMe ? 'resume' : 'pause', hash: t.hash },
       }));
     this.shadowRoot.querySelector('.del').onclick = () => {
       if (!confirm(`Удалить «${t.name}»?`)) return;

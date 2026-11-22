@@ -145,6 +145,8 @@ pub async fn torrents_add(
                         subscribers: vec![user.0.clone()],
                         added_at: now(),
                         completed_at: None,
+                        user_states: std::collections::HashMap::new(),
+                        seeding_paused: None,
                     },
                     &user.0,
                 );
@@ -241,18 +243,32 @@ async fn pause_resume(app: &App, username: &str, form: &Form, pause: bool) {
         .filter(|h| !h.is_empty())
         .collect();
     for hash in hashes {
-        let id = {
-            let p = app.persist.lock().unwrap();
-            match p.torrents.get(&hash) {
-                Some(rec) if rec.subscribers.iter().any(|s| s == username) => Some(rec.id),
-                _ => None,
-            }
-        };
-        if let Some(id) = id {
-            let r = if pause {
-                crate::torrent::pause(&app.session, id).await
+        // только свои (подписчик) — иначе *arr может трогать чужое
+        let (id, desired_running) = {
+            let mut p = app.persist.lock().unwrap();
+            let is_subscriber = p
+                .torrents
+                .get(&hash)
+                .map(|rec| rec.subscribers.iter().any(|s| s == username))
+                .unwrap_or(false);
+            let d = if is_subscriber {
+                Some(if pause {
+                    crate::state::user_pause(&mut p, &hash, username)
+                } else {
+                    crate::state::user_resume(&mut p, &hash, username)
+                })
             } else {
+                None
+            };
+            let id = p.torrents.get(&hash).map(|rec| rec.id);
+            crate::state::save(&app.persist_dir(), &p).ok();
+            (id, d)
+        };
+        if let (Some(id), Some(desired)) = (id, desired_running) {
+            let r = if desired {
                 crate::torrent::resume(&app.session, id).await
+            } else {
+                crate::torrent::pause(&app.session, id).await
             };
             if let Err(e) = r {
                 tracing::warn!("compat pause/resume {hash}: {e}");
