@@ -37,7 +37,6 @@ tpl.innerHTML = `
 <div class="add">
   <input id="new" placeholder="новая/категория" title="Например: movies/action — вложенность через /">
   <button id="addBtn" title="Создать категорию">+</button>
-  <button id="addBtn">+</button>
 </div>`;
 
 // плоский список ["movies", "movies/action"] -> дерево
@@ -62,7 +61,8 @@ class CategoryTree extends HTMLElement {
     this.shadowRoot.getElementById('addBtn').onclick = () => this.addNew();
     // новая категория, созданная на лету при добавлении торрента
     document.addEventListener('refresh-categories', () => this.load());
-    this.shadowRoot.getElementById('new').onkeydown = (e) => e.key === 'Enter' && this.addNew();
+    // ponytail: стрелка с && вернёт false для не-Enter, а false из on* = preventDefault — текст не вводится
+    this.shadowRoot.getElementById('new').onkeydown = (e) => { if (e.key === 'Enter') this.addNew(); };
   }
 
   async load() {

@@ -42,7 +42,8 @@ class TorrentAdd extends HTMLElement {
     super();
     this.attachShadow({ mode: 'open' }).appendChild(tpl.content.cloneNode(true));
     this.shadowRoot.getElementById('go').onclick = () => this.addMagnet();
-    this.shadowRoot.getElementById('magnet').onkeydown = (e) => e.key === 'Enter' && this.addMagnet();
+    // ponytail: то же — false из on* блокирует ввод
+    this.shadowRoot.getElementById('magnet').onkeydown = (e) => { if (e.key === 'Enter') this.addMagnet(); };
     this.shadowRoot.getElementById('file').onchange = (e) => this.addFile(e.target.files[0]);
     document.addEventListener('categories-changed', (e) => this.refreshCategories(e.detail));
   }
