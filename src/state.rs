@@ -279,19 +279,18 @@ pub fn user_delete(p: &mut Persisted, actor: &str, user: &str) -> Result<Vec<usi
 
 /// Роль при входе: local — из записи; ad — admin если в списке ADMINS, иначе user.
 pub fn role_on_login(p: &mut Persisted, user: &str, admins: &[String]) -> String {
+    let is_admin = admins.iter().any(|a| a == user);
     match p.users.get_mut(user) {
-        Some(rec) if rec.role == "admin" => "admin".into(),
+        // локальный пользователь (пароль задан): роль управляется только из панели
+        Some(rec) if rec.hash.is_some() => rec.role.clone(),
+        // доменный: роль синхронизируется со списком ADMINS при каждом входе
         Some(rec) => {
-            if admins.iter().any(|a| a == user) {
-                rec.role = "admin".into();
-                "admin".into()
-            } else {
-                "user".into()
-            }
+            rec.role = if is_admin { "admin" } else { "user" }.into();
+            rec.role.clone()
         }
         // первый вход доменного пользователя
         None => {
-            let role = if admins.iter().any(|a| a == user) { "admin" } else { "user" };
+            let role = if is_admin { "admin" } else { "user" };
             p.users.insert(
                 user.to_string(),
                 UserRec { hash: None, role: role.into() },
@@ -336,6 +335,18 @@ mod tests {
 
     fn p() -> Persisted {
         Persisted::default()
+    }
+
+    #[test]
+    fn ad_role_syncs_with_admins_list() {
+        let mut s = p();
+        // первый вход доменного: из списка -> админ
+        assert_eq!(role_on_login(&mut s, "ilnar", &["ilnar".into()]), "admin");
+        // убрали из списка -> при следующем входе понизился
+        assert_eq!(role_on_login(&mut s, "ilnar", &[]), "user");
+        // локальный пользователь с паролем: роль из панели, ADMINS не трогает
+        s.users.insert("admin".into(), UserRec { hash: Some("h".into()), role: "admin".into() });
+        assert_eq!(role_on_login(&mut s, "admin", &[]), "admin");
     }
 
     #[test]
