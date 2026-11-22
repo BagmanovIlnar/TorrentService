@@ -35,7 +35,8 @@ tpl.innerHTML = `
 <h2>Категории</h2>
 <ul id="list"></ul>
 <div class="add">
-  <input id="new" placeholder="movies/action">
+  <input id="new" placeholder="новая/категория" title="Например: movies/action — вложенность через /">
+  <button id="addBtn" title="Создать категорию">+</button>
   <button id="addBtn">+</button>
 </div>`;
 
@@ -75,7 +76,7 @@ class CategoryTree extends HTMLElement {
       for (const [name, child] of node.children) {
         const li = document.createElement('li');
         li.innerHTML = `
-          <button class="node" style="padding-left:${10 + depth * 16}px">
+          <button class="node" data-full="${child.full ?? ''}" style="padding-left:${10 + depth * 16}px">
             <span class="name">${name}</span>
             <span class="cnt"></span>
           </button>
@@ -111,10 +112,12 @@ class CategoryTree extends HTMLElement {
     const input = this.shadowRoot.getElementById('new');
     const name = input.value.trim();
     if (!name) return;
+    const existed = (await api.categories().catch(() => [])).includes(name);
     try {
       await api.addCategory(name);
       input.value = '';
       await this.load();
+      if (!existed) this.select(name, this.shadowRoot.querySelector(`.node[data-full="${CSS.escape(name)}"]`));
     } catch (ex) {
       alert(ex.message);
     }
