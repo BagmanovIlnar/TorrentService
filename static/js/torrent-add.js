@@ -12,9 +12,9 @@ tpl.innerHTML = `
     flex: 1; min-width: 260px; background: var(--panel2); color: var(--text);
     border: 1px solid var(--border); border-radius: var(--radius); padding: 9px 12px; font: inherit;
   }
-  select {
-    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 9px; font: inherit;
+  input#cat {
+    width: 160px; background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 9px 12px; font: inherit;
   }
   button {
     background: var(--accent); color: #fff; border: 0; border-radius: var(--radius);
@@ -30,7 +30,8 @@ tpl.innerHTML = `
 </style>
 <div class="box">
   <input id="magnet" placeholder="magnet:?xt=urn:btih:...">
-  <select id="cat"><option value="">— без категории —</option></select>
+  <input id="cat" list="cat-list" placeholder="категория">
+  <datalist id="cat-list"></datalist>
   <label class="file">.torrent файл<input type="file" id="file" accept=".torrent"></label>
   <button id="go">Добавить</button>
   <div class="err"></div>
@@ -47,11 +48,8 @@ class TorrentAdd extends HTMLElement {
   }
 
   refreshCategories(cats) {
-    const sel = this.shadowRoot.getElementById('cat');
-    const current = sel.value;
-    sel.innerHTML = '<option value="">— без категории —</option>' +
-      cats.map((c) => `<option value="${c}">${c}</option>`).join('');
-    if (cats.includes(current)) sel.value = current;
+    this.shadowRoot.getElementById('cat-list').innerHTML =
+      cats.map((c) => `<option value="${c}">`).join('');
   }
 
   async addMagnet() {
@@ -61,9 +59,10 @@ class TorrentAdd extends HTMLElement {
     if (!magnet) return;
     err.textContent = '';
     try {
-      await api.addTorrent(magnet, this.shadowRoot.getElementById('cat').value);
+      await api.addTorrent(magnet, this.shadowRoot.getElementById('cat').value.trim());
       input.value = '';
       document.dispatchEvent(new CustomEvent('torrents-changed'));
+      document.dispatchEvent(new CustomEvent('refresh-categories'));
     } catch (ex) {
       err.textContent = ex.message;
     }
@@ -74,9 +73,10 @@ class TorrentAdd extends HTMLElement {
     const err = this.shadowRoot.querySelector('.err');
     err.textContent = '';
     try {
-      await api.addTorrentFile(file, this.shadowRoot.getElementById('cat').value);
+      await api.addTorrentFile(file, this.shadowRoot.getElementById('cat').value.trim());
       this.shadowRoot.getElementById('file').value = '';
       document.dispatchEvent(new CustomEvent('torrents-changed'));
+      document.dispatchEvent(new CustomEvent('refresh-categories'));
     } catch (ex) {
       err.textContent = ex.message;
     }

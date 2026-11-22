@@ -59,6 +59,8 @@ class CategoryTree extends HTMLElement {
     this.attachShadow({ mode: 'open' }).appendChild(tpl.content.cloneNode(true));
     this.selected = null;
     this.shadowRoot.getElementById('addBtn').onclick = () => this.addNew();
+    // новая категория, созданная на лету при добавлении торрента
+    document.addEventListener('refresh-categories', () => this.load());
     this.shadowRoot.getElementById('new').onkeydown = (e) => e.key === 'Enter' && this.addNew();
   }
 
@@ -109,9 +111,13 @@ class CategoryTree extends HTMLElement {
     const input = this.shadowRoot.getElementById('new');
     const name = input.value.trim();
     if (!name) return;
-    await api.addCategory(name);
-    input.value = '';
-    await this.load();
+    try {
+      await api.addCategory(name);
+      input.value = '';
+      await this.load();
+    } catch (ex) {
+      alert(ex.message);
+    }
   }
 }
 customElements.define('category-tree', CategoryTree);

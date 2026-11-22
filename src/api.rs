@@ -99,16 +99,13 @@ pub async fn post_torrents(
 ) -> Response {
     let category = match req.category {
         Some(c) => {
-            let owned = app
-                .persist
-                .lock()
-                .unwrap()
-                .categories
-                .get(&user.0)
-                .map(|list| list.contains(&c))
-                .unwrap_or(false);
-            if !owned {
-                return (StatusCode::FORBIDDEN, "no such category").into_response();
+            // создаём на лету, как в qBittorrent (валидация/предки внутри category_add)
+            {
+                let mut p = app.persist.lock().unwrap();
+                if !p.categories.get(&user.0).map(|l| l.contains(&c)).unwrap_or(false) {
+                    state::category_add(&mut p, &user.0, &c);
+                    state::save(&app.persist_dir(), &p).ok();
+                }
             }
             Some(c)
         }
@@ -172,16 +169,10 @@ pub async fn post_torrent_file(
         return (StatusCode::BAD_REQUEST, "no file").into_response();
     };
     if let Some(c) = &category {
-        let owned = app
-            .persist
-            .lock()
-            .unwrap()
-            .categories
-            .get(&user.0)
-            .map(|list| list.contains(c))
-            .unwrap_or(false);
-        if !owned {
-            return (StatusCode::FORBIDDEN, "no such category").into_response();
+        let mut p = app.persist.lock().unwrap();
+        if !p.categories.get(&user.0).map(|l| l.contains(c)).unwrap_or(false) {
+            state::category_add(&mut p, &user.0, c);
+            state::save(&app.persist_dir(), &p).ok();
         }
     }
     let source = librqbit::AddTorrent::from_bytes(bytes);

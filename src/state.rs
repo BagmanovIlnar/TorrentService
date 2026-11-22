@@ -102,7 +102,8 @@ pub fn category_add(p: &mut Persisted, user: &str, name: &str) {
     let list = p.categories.entry(user.to_string()).or_default();
     let mut parts: Vec<&str> = Vec::new();
     for part in name.split('/') {
-        if part.is_empty() {
+        // ponytail: категория становится путём на диске — "..", "." и "\" наружу не пускаем
+        if part.is_empty() || part == "." || part == ".." || part.contains('\\') {
             continue;
         }
         parts.push(part);
@@ -335,6 +336,15 @@ mod tests {
 
     fn p() -> Persisted {
         Persisted::default()
+    }
+
+    #[test]
+    fn category_add_rejects_traversal() {
+        let mut s = p();
+        category_add(&mut s, "u", "../../etc");
+        assert_eq!(s.categories["u"], vec!["etc"]);
+        category_add(&mut s, "u", "a/b/..\\x");
+        assert_eq!(s.categories["u"], vec!["etc", "a", "a/b"]);
     }
 
     #[test]
