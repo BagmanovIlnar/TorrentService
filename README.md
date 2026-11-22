@@ -33,7 +33,7 @@ docker compose up --build     # http://localhost:8280
 ## Интеграция с home_server
 
 1. Скопировать репо в `home_server/services/torrent_service`
-2. Взять блок сервиса из `compose.home.yaml` в корневой `docker-compose.yml`
+2. Взять блок сервиса из `docker-compose.home.yml` в корневой `docker-compose.yml`
 3. В `.env` домашнего сервера: `SECRET`, `TORRENT_HTTP_PORT=8280`, `TORRENT_BT_PORT=6882`
 4. `AUTH_MODE=ad` — логин доменными учётками против `service_samba_addc`
 5. В radarr/sonarr/lidarr: Download Client → qBittorrent,
