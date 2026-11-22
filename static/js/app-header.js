@@ -30,6 +30,7 @@ tpl.innerHTML = `
 <nav>
   <button data-view="torrents" class="active">Торренты</button>
   <button data-view="files">Файлы</button>
+  <button data-view="users" hidden>Пользователи</button>
 </nav>
 <span class="user"></span>
 <button class="logout">Выйти</button>`;
@@ -46,6 +47,10 @@ class AppHeader extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: 'open' }).appendChild(tpl.content.cloneNode(true));
+    // «Пользователи» — только админам
+    import('./api.js').then(({ api }) => api.me().then((me) => {
+      if (me.role === 'admin') this.shadowRoot.querySelector('[data-view=users]').hidden = false;
+    }).catch(() => {}));
     this.shadowRoot.querySelector('button.logout').onclick = async () => {
       await api.logout().catch(() => {});
       document.dispatchEvent(new CustomEvent('logout'));

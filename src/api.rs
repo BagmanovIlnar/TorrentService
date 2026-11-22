@@ -4,7 +4,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -360,6 +360,158 @@ pub async fn post_category(
     }
     state::save(&app.persist_dir(), &p).ok();
     StatusCode::OK.into_response()
+}
+
+// --- пользователи (админка) ---
+
+/// 403 если юзер не админ
+fn admin_only(app: &App, user: &str) -> Option<Response> {
+    if state::is_admin(&app.persist.lock().unwrap(), user) {
+        None
+    } else {
+        Some(axum::http::StatusCode::FORBIDDEN.into_response())
+    }
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub struct UserInfo {
+    pub name: String,
+    pub role: String,
+    /// true = пароль в АД, поменять здесь нельзя
+    pub from_ad: bool,
+}
+
+/// GET /me — кто я и какая роль (фронт по роли показывает админку)
+#[utoipa::path(get, path = "/me", responses((status = 200, body = UserInfo)))]
+pub async fn get_me(user: CurrentUser, State(app): State<App>) -> Json<UserInfo> {
+    let p = app.persist.lock().unwrap();
+    let rec = p.users.get(&user.0);
+    Json(UserInfo {
+        name: user.0.clone(),
+        role: rec.map(|u| u.role.clone()).unwrap_or_else(|| "user".into()),
+        from_ad: rec.map(|u| u.hash.is_none()).unwrap_or(false),
+    })
+}
+
+/// GET /users — список (только админ)
+#[utoipa::path(get, path = "/users", responses((status = 200, body = [UserInfo])))]
+pub async fn get_users(admin: CurrentUser, State(app): State<App>) -> Response {
+    if let Some(r) = admin_only(&app, &admin.0) { return r; }
+    let p = app.persist.lock().unwrap();
+    let list: Vec<UserInfo> = p
+        .users
+        .iter()
+        .map(|(name, u)| UserInfo {
+            name: name.clone(),
+            role: u.role.clone(),
+            from_ad: u.hash.is_none(),
+        })
+        .collect();
+    Json(list).into_response()
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct NewUser {
+    pub user: String,
+    pub pass: String,
+    /// "admin" | "user" (default user)
+    pub role: Option<String>,
+}
+
+/// POST /users — создать (только local-режим; в AD пользователи в АД)
+#[utoipa::path(post, path = "/users", request_body = NewUser,
+    responses((status = 200), (status = 400), (status = 409)))]
+pub async fn post_users(
+    admin: CurrentUser,
+    State(app): State<App>,
+    Json(req): Json<NewUser>,
+) -> Response {
+    if let Some(r) = admin_only(&app, &admin.0) { return r; }
+    if app.auth.mode == crate::config::AuthMode::Ad {
+        return (StatusCode::CONFLICT, "пользователи управляются в AD (samba-tool user create)").into_response();
+    }
+    let role = req.role.as_deref().unwrap_or("user");
+    let mut p = app.persist.lock().unwrap();
+    if p.users.contains_key(&req.user) {
+        return (StatusCode::CONFLICT, "уже существует").into_response();
+    }
+    match state::user_add(&mut p, &req.user, &req.pass, role) {
+        Ok(_) => {
+            state::save(&app.persist_dir(), &p).ok();
+            StatusCode::OK.into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
+}
+
+/// DELETE /users/{name} — удалить; его торренты, оставшиеся без подписчиков,
+/// удаляются вместе с файлами. Себя и последнего админа удалить нельзя.
+#[utoipa::path(delete, path = "/users/{name}", responses((status = 200), (status = 409)))]
+pub async fn delete_user(
+    admin: CurrentUser,
+    State(app): State<App>,
+    Path(name): Path<String>,
+) -> Response {
+    if let Some(r) = admin_only(&app, &admin.0) { return r; }
+    if app.auth.mode == crate::config::AuthMode::Ad {
+        return (StatusCode::CONFLICT, "пользователи управляются в AD").into_response();
+    }
+    let orphaned = {
+        let mut p = app.persist.lock().unwrap();
+        match state::user_delete(&mut p, &admin.0, &name) {
+            Ok(v) => v,
+            Err("self") => return (StatusCode::CONFLICT, "нельзя удалить себя").into_response(),
+            Err("last admin") => {
+                return (StatusCode::CONFLICT, "нельзя удалить последнего админа").into_response()
+            }
+            Err(e) => return (StatusCode::CONFLICT, e).into_response(),
+        }
+    };
+    for id in orphaned {
+        crate::torrent::remove(&app.session, id, true).await.ok();
+    }
+    StatusCode::OK.into_response()
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub struct SetPasswordReq {
+    pub pass: String,
+}
+
+/// POST /users/{name}/password — сменить пароль (админ или сам себе)
+#[utoipa::path(post, path = "/users/{name}/password", request_body = SetPasswordReq,
+    responses((status = 200), (status = 400), (status = 403), (status = 409)))]
+pub async fn post_password(
+    actor: CurrentUser,
+    State(app): State<App>,
+    Path(name): Path<String>,
+    Json(req): Json<SetPasswordReq>,
+) -> Response {
+    let is_admin = state::is_admin(&app.persist.lock().unwrap(), &actor.0);
+    if !is_admin && actor.0 != name {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if app.auth.mode == crate::config::AuthMode::Ad {
+        let from_ad = app
+            .persist
+            .lock()
+            .unwrap()
+            .users
+            .get(&name)
+            .map(|u| u.hash.is_none())
+            .unwrap_or(true);
+        if from_ad {
+            return (StatusCode::CONFLICT, "пароль доменного пользователя меняется в AD").into_response();
+        }
+    }
+    let mut p = app.persist.lock().unwrap();
+    match state::user_set_password(&mut p, &name, &req.pass) {
+        Ok(_) => {
+            state::save(&app.persist_dir(), &p).ok();
+            StatusCode::OK.into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+    }
 }
 
 // --- категории ---

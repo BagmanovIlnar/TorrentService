@@ -43,4 +43,9 @@ export const api = {
   deleteCategory: (name) => req('DELETE', `/categories/${encodeURIComponent(name)}`),
   files: (path) => req('GET', '/files' + (path ? `?path=${encodeURIComponent(path)}` : '')),
   deleteFile: (path) => req('DELETE', `/files?path=${encodeURIComponent(path)}`),
+  me: () => req('GET', '/me'),
+  users: () => req('GET', '/users'),
+  addUser: (user, pass, role) => req('POST', '/users', { user, pass, role }),
+  deleteUser: (name) => req('DELETE', `/users/${encodeURIComponent(name)}`),
+  setPassword: (name, pass) => req('POST', `/users/${encodeURIComponent(name)}/password`, { pass }),
 };

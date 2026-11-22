@@ -12,7 +12,8 @@ services:
       - DOWNLOADS_DIR=/downloads
       - PERSIST_DIR=/state
       - AUTH_MODE=${AUTH_MODE:-local}
-      - LOCAL_USERS=${LOCAL_USERS:-test:pass123}
+      - LOCAL_USERS=${LOCAL_USERS:-admin:adminpass,wife:pass456}
+      - ADMINS=${ADMINS:-}
       - AD_URL=${AD_URL:-}
       - AD_DOMAIN=${AD_DOMAIN:-HOME.ARPA}
       - SECRET=${SECRET:?Set SECRET in .env (openssl rand -hex 32)}

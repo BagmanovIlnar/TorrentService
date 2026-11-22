@@ -12,9 +12,9 @@ pub const USER_PAUSED: &str = "paused";
 /// владельцы (подписчики), категории, локальные пользователи, секрет.
 #[derive(Serialize, Deserialize, Default)]
 pub struct Persisted {
-    /// local-режим: user -> argon2 PHC-хеш (из LOCAL_USERS при старте)
+    /// учётки: argon2-хеш + роль ("admin"|"user"). Для AD-юзеров hash = None.
     #[serde(default)]
-    pub users: HashMap<String, String>,
+    pub users: HashMap<String, UserRec>,
     /// HMAC-секрет, если не задан через SECRET env (сессии переживают рестарт)
     #[serde(default)]
     pub secret_hex: Option<String>,
@@ -24,6 +24,39 @@ pub struct Persisted {
     /// hash -> запись о торренте
     #[serde(default)]
     pub torrents: HashMap<String, TorrentRec>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct UserRec {
+    /// argon2 PHC-хеш; None = доменный пользователь (пароль в АД)
+    pub hash: Option<String>,
+    pub role: String, // "admin" | "user"
+}
+
+// Старые state.json хранили users как {name: "hash"} — принимаем оба формата,
+// чтобы не терять торренты при обновлении.
+impl<'de> Deserialize<'de> for UserRec {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct New {
+            hash: Option<String>,
+            #[serde(default = "default_role")]
+            role: String,
+        }
+        fn default_role() -> String {
+            "user".into()
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Any {
+            New(New),
+            OldHash(String),
+        }
+        Ok(match Any::deserialize(d)? {
+            Any::New(n) => UserRec { hash: n.hash, role: n.role },
+            Any::OldHash(h) => UserRec { hash: Some(h), role: "user".into() },
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -168,21 +201,123 @@ pub fn unsubscribe(p: &mut Persisted, hash: &str, user: &str) -> bool {
     !empty
 }
 
+// --- управление пользователями (админка) ---
+
+pub fn is_admin(p: &Persisted, user: &str) -> bool {
+    p.users.get(user).map(|u| u.role == "admin").unwrap_or(false)
+}
+
+/// Создать/обновить пользователя. Пароль хешируется argon2.
+pub fn user_add(p: &mut Persisted, user: &str, pass: &str, role: &str) -> Result<(), &'static str> {
+    if !crate::auth::valid_username(user) {
+        return Err("bad username");
+    }
+    if pass.len() < 4 {
+        return Err("password too short (min 4)");
+    }
+    let salt = argon2::password_hash::SaltString::generate(&mut rand_core::OsRng);
+    let hash = argon2::Argon2::default()
+        .hash_password(pass.as_bytes(), &salt)
+        .map_err(|_| "hash error")?
+        .to_string();
+    p.users.insert(
+        user.to_string(),
+        UserRec { hash: Some(hash), role: role.to_string() },
+    );
+    Ok(())
+}
+
+pub fn user_set_password(p: &mut Persisted, user: &str, pass: &str) -> Result<(), &'static str> {
+    if pass.len() < 4 {
+        return Err("password too short (min 4)");
+    }
+    let salt = argon2::password_hash::SaltString::generate(&mut rand_core::OsRng);
+    let hash = argon2::Argon2::default()
+        .hash_password(pass.as_bytes(), &salt)
+        .map_err(|_| "hash error")?
+        .to_string();
+    match p.users.get_mut(user) {
+        Some(rec) => {
+            rec.hash = Some(hash);
+            Ok(())
+        }
+        None => Err("no such user"),
+    }
+}
+
+/// Удалить пользователя: отписка от всех его торрентов (опустевшие удаляются
+/// с файлами), его категории стираются. Ошибки:
+/// "self" — нельзя удалить себя, "last admin" — нельзя оставить систему без админа.
+pub fn user_delete(p: &mut Persisted, actor: &str, user: &str) -> Result<Vec<usize>, &'static str> {
+    if user == actor {
+        return Err("self");
+    }
+    if is_admin(p, user) && p.users.values().filter(|u| u.role == "admin").count() <= 1 {
+        return Err("last admin");
+    }
+    let mut orphaned: Vec<usize> = Vec::new();
+    let hashes: Vec<String> = p
+        .torrents
+        .iter()
+        .filter(|(_, r)| r.subscribers.iter().any(|s| s == user))
+        .map(|(h, _)| h.clone())
+        .collect();
+    for h in hashes {
+        let still_used = unsubscribe(p, &h, user);
+        if !still_used {
+            if let Some(rec) = p.torrents.get(&h) {
+                orphaned.push(rec.id);
+            }
+            p.torrents.remove(&h);
+        }
+    }
+    p.users.remove(user);
+    p.categories.remove(user);
+    Ok(orphaned)
+}
+
+/// Роль при входе: local — из записи; ad — admin если в списке ADMINS, иначе user.
+pub fn role_on_login(p: &mut Persisted, user: &str, admins: &[String]) -> String {
+    match p.users.get_mut(user) {
+        Some(rec) if rec.role == "admin" => "admin".into(),
+        Some(rec) => {
+            if admins.iter().any(|a| a == user) {
+                rec.role = "admin".into();
+                "admin".into()
+            } else {
+                "user".into()
+            }
+        }
+        // первый вход доменного пользователя
+        None => {
+            let role = if admins.iter().any(|a| a == user) { "admin" } else { "user" };
+            p.users.insert(
+                user.to_string(),
+                UserRec { hash: None, role: role.into() },
+            );
+            role.into()
+        }
+    }
+}
+
+use argon2::PasswordHasher;
 use rand_core::RngCore;
 
 pub fn init(config: &Config) -> anyhow::Result<Persisted> {
     fs::create_dir_all(&config.downloads_dir)?;
     fs::create_dir_all(&config.persist_dir)?;
     let mut p = load(&config.persist_dir);
-    // local-режим: env — источник правды по пользователям, перезаписываем хеши
-    if config.auth_mode == crate::config::AuthMode::Local {
-        for (user, pass) in &config.local_users {
-            let salt = argon2::password_hash::SaltString::generate(&mut rand_core::OsRng);
-            use argon2::PasswordHasher;
-            let hash = argon2::Argon2::default()
-                .hash_password(pass.as_bytes(), &salt)?
-                .to_string();
-            p.users.insert(user.clone(), hash);
+    // local-режим: сидируем из env ТОЛЬКО если пользователей ещё нет —
+    // дальше правды в админке (env перезаписал бы созданных в UI).
+    // Первый в LOCAL_USERS становится админом.
+    if config.auth_mode == crate::config::AuthMode::Local && p.users.is_empty() {
+        for (i, (user, pass)) in config.local_users.iter().enumerate() {
+            let _ = user_add(
+                &mut p,
+                user,
+                pass,
+                if i == 0 { "admin" } else { "user" },
+            );
         }
     }
     if p.secret_hex.is_none() {

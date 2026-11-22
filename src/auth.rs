@@ -25,6 +25,9 @@ pub struct AuthState {
     pub ad_url: String,
     pub ad_domain: String,
     pub sso_spn: Option<String>,
+    /// AD-режим: доменные логины с правами админа (env ADMINS)
+    pub admins: Vec<String>,
+    pub persist_dir: std::path::PathBuf,
 }
 
 /// Имя пользователя из куки. Вставляется middleware, хендлеры берут экстрактором.
@@ -169,12 +172,18 @@ pub async fn login_check(
     let verified = match auth.mode {
         AuthMode::Ad => ldap_bind(&auth.ad_url, &auth.ad_domain, user, pass).await,
         AuthMode::Local => {
-            let hash = persist.lock().unwrap().users.get(user).cloned();
-            hash.map(|h| local_verify(&h, pass)).unwrap_or(false)
+            let rec = persist.lock().unwrap().users.get(user).cloned();
+            rec.and_then(|u| u.hash).map(|h| local_verify(&h, pass)).unwrap_or(false)
         }
     };
     if !verified {
         return Err(StatusCode::UNAUTHORIZED);
+    }
+    // фиксируем роль (для AD-юзеров создаём запись с ролью из ADMINS)
+    {
+        let mut p = persist.lock().unwrap();
+        crate::state::role_on_login(&mut p, user, &auth.admins);
+        crate::state::save(&auth.persist_dir, &p).ok();
     }
     Ok(make_token(&auth.secret, user))
 }

@@ -13,6 +13,9 @@ radarr/sonarr/lidarr подключаются как к qBittorrent.
 - удаление = отписка; файлы сносятся, когда ушёл последний подписчик
 - файловый браузер по `downloads/` с удалением (path-traversal закрыт)
 - auth: `local` (users из env, argon2) или `ad` (LDAP bind против Samba AD)
+- админка в вебе: создание/удаление пользователей, смена паролей, роли
+  (`LOCAL_USERS` сидирует при первом старте, первый — админ; в AD-режиме
+  доменные админы через `ADMINS`)
 - Kerberos SSO (SPNEGO): доменные машины входят без пароля (feature `sso` + keytab)
 - per-user пауза: движок встаёт, только когда паузу хотят все подписчики
 - сид-лимиты: по ratio и/или времени (`SEED_RATIO_LIMIT`, `SEED_TIME_MINUTES`)
@@ -58,7 +61,8 @@ jellyfin/bazarr не требуют настройки — пути `/downloads`
 | DOWNLOADS_DIR | ./downloads | куда качается |
 | PERSIST_DIR | ./state | state.json + сессия librqbit |
 | AUTH_MODE | local | local \| ad |
-| LOCAL_USERS | — | user:pass,... для local |
+| LOCAL_USERS | — | user:pass,... для local (первый = админ; сидируется при пустой БД) |
+| ADMINS | — | доменные логины-админы для AUTH_MODE=ad |
 | AD_URL | — | ldap://service_samba_addc:389 для ad |
 | AD_DOMAIN | HOME.ARPA | realm для bind user@DOMAIN |
 | SECRET | генерится | HMAC-ключ сессий (hex) |

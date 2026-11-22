@@ -32,6 +32,11 @@ use utoipa_swagger_ui::SwaggerUi;
         api::delete_categories,
         files::get_files,
         files::delete_file,
+        api::get_me,
+        api::get_users,
+        api::post_users,
+        api::delete_user,
+        api::post_password,
     ),
     components(schemas(
         auth::LoginReq,
@@ -40,6 +45,9 @@ use utoipa_swagger_ui::SwaggerUi;
         api::SetCategoryReq,
         api::NameReq,
         files::EntryInfo,
+        api::UserInfo,
+        api::NewUser,
+        api::SetPasswordReq,
     )),
     info(title = "TorrentService", description = "Мультипользовательский веб-клиент торрентов (librqbit). Категории с вложенностью через '/', дедуп торрентов между пользователями, изоляция, qBittorrent-совместимый слой для *arr на /api/v2.")
 )]
@@ -62,6 +70,13 @@ async fn main() -> anyhow::Result<()> {
         ad_url: cfg.ad_url.clone(),
         ad_domain: cfg.ad_domain.clone(),
         sso_spn: cfg.sso_spn.clone(),
+        admins: std::env::var("ADMINS")
+            .unwrap_or_default()
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        persist_dir: cfg.persist_dir.clone(),
     };
     let persist_arc = Arc::new(std::sync::Mutex::new(persist));
     let app_state = api::App {
@@ -88,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let app = Router::new()
+    let protected = Router::new()
         .route("/torrents", get(api::get_torrents).post(api::post_torrents))
         .route("/torrents/file", post(api::post_torrent_file))
         .route("/torrents/{hash}", delete(api::delete_torrent))
@@ -98,6 +113,20 @@ async fn main() -> anyhow::Result<()> {
         .route("/categories", get(api::get_categories).post(api::post_categories))
         .route("/categories/{name}", delete(api::delete_categories))
         .route("/files", get(files::get_files).delete(files::delete_file))
+        .route("/me", get(api::get_me))
+        // админка /users — проверка роли внутри хендлеров (require_admin_user)
+        .route("/users", get(api::get_users).post(api::post_users))
+        .route("/users/{name}", delete(api::delete_user))
+        .route("/users/{name}/password", post(api::post_password))
+        // route_layer действует только на маршруты выше: /torrents, /categories, /files, /users, /api/v2/*
+        .route_layer(middleware::from_fn_with_state(
+            auth_state.clone(),
+            auth::require_auth,
+        ))
+        .with_state(app_state.clone());
+
+    let app = Router::new()
+        .merge(protected)
         .route(
             "/api/v2/app/version",
             get(compat::app_version),
@@ -108,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v2/torrents/delete", post(compat::torrents_delete))
         .route("/api/v2/torrents/pause", post(compat::torrents_pause))
         .route("/api/v2/torrents/resume", post(compat::torrents_resume))
-        // route_layer действует только на маршруты выше: /torrents, /categories, /files, /api/v2/*
+        // route_layer действовал только на маршруты выше
         .route_layer(middleware::from_fn_with_state(
             auth_state.clone(),
             auth::require_auth,

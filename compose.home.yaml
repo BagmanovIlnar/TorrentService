@@ -26,6 +26,7 @@
       - AUTH_MODE=ad
       - AD_URL=ldap://service_samba_addc:389
       - AD_DOMAIN=${AD_REALM:-HOME.ARPA}
+      - ADMINS=${ADMINS:-}
       - SECRET=${SECRET:?Set SECRET in .env (openssl rand -hex 32)}
       # --- Kerberos SSO ---
       # Доменные машины с тикетом входят без пароля (SPNEGO).

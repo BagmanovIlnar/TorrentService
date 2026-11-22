@@ -43,6 +43,7 @@
           <torrent-list></torrent-list>
         </section>
         <section id="files-view" hidden><file-browser></file-browser></section>
+        <section id="users-view" hidden><user-admin></user-admin></section>
       </div>
     </div>
   </div>
@@ -55,6 +56,7 @@
   <script type="module" src="/js/torrent-row.js"></script>
   <script type="module" src="/js/torrent-list.js"></script>
   <script type="module" src="/js/file-browser.js"></script>
+  <script type="module" src="/js/user-admin.js"></script>
   <script type="module">
     const loginView = document.getElementById('login-view');
     const appView = document.getElementById('app-view');
@@ -79,7 +81,9 @@
     document.addEventListener('nav', (e) => {
       document.getElementById('torrents-view').hidden = e.detail.view !== 'torrents';
       document.getElementById('files-view').hidden = e.detail.view !== 'files';
+      document.getElementById('users-view').hidden = e.detail.view !== 'users';
       if (e.detail.view === 'files') document.querySelector('file-browser').load();
+      if (e.detail.view === 'users') document.querySelector('user-admin').load();
     });
     // фильтр по категории
     document.addEventListener('category-selected', (e) => {
