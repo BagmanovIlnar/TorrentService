@@ -1,0 +1,25 @@
+# Локальная разработка: AUTH_MODE=local, без АД.
+# Для прод-интеграции с home_server см. compose.home.yaml
+services:
+  torrent_service:
+    build: .
+    restart: always
+    container_name: service_torrent_service
+    environment:
+      - TZ=${TZ:-Europe/Moscow}
+      - PORT=${TORRENT_HTTP_PORT:-8280}
+      - BT_PORT=${TORRENT_BT_PORT:-6882}
+      - DOWNLOADS_DIR=/downloads
+      - PERSIST_DIR=/state
+      - AUTH_MODE=${AUTH_MODE:-local}
+      - LOCAL_USERS=${LOCAL_USERS:-test:pass123}
+      - AD_URL=${AD_URL:-}
+      - AD_DOMAIN=${AD_DOMAIN:-HOME.ARPA}
+      - SECRET=${SECRET:?Set SECRET in .env (openssl rand -hex 32)}
+    ports:
+      - "${TORRENT_HTTP_PORT:-8280}:8280"   # HTTP (8080 занят qbittorrent)
+      - "${TORRENT_BT_PORT:-6882}:6882"     # BitTorrent TCP (6881 занят qbittorrent)
+      - "${TORRENT_BT_PORT:-6882}:6882/udp"
+    volumes:
+      - ./folders/downloads:/downloads
+      - ./folders/state:/state

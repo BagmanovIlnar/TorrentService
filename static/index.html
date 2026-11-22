@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TorrentService</title>
+  <style>
+    :root {
+      --bg: #12141a;
+      --panel: #1a1d26;
+      --panel2: #21252f;
+      --border: #2e3341;
+      --text: #d8dbe2;
+      --muted: #7d8494;
+      --accent: #4f8cff;
+      --ok: #3fb96f;
+      --warn: #d9a53f;
+      --err: #e05252;
+      --radius: 8px;
+    }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font: 14px/1.45 system-ui, -apple-system, sans-serif;
+    }
+    #login-view[hidden], #app-view[hidden] { display: none; }
+    #app-view { display: flex; flex-direction: column; height: 100vh; }
+    #main { display: flex; flex: 1; min-height: 0; }
+    #sidebar { width: 260px; flex-shrink: 0; border-right: 1px solid var(--border); overflow-y: auto; }
+    #content { flex: 1; min-width: 0; overflow-y: auto; padding: 16px; }
+    #files-view[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <div id="login-view"><login-form></login-form></div>
+
+  <div id="app-view" hidden>
+    <app-header></app-header>
+    <div id="main">
+      <div id="sidebar"><category-tree></category-tree></div>
+      <div id="content">
+        <section id="torrents-view">
+          <torrent-add></torrent-add>
+          <torrent-list></torrent-list>
+        </section>
+        <section id="files-view" hidden><file-browser></file-browser></section>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/js/api.js"></script>
+  <script type="module" src="/js/login-form.js"></script>
+  <script type="module" src="/js/app-header.js"></script>
+  <script type="module" src="/js/category-tree.js"></script>
+  <script type="module" src="/js/torrent-add.js"></script>
+  <script type="module" src="/js/torrent-row.js"></script>
+  <script type="module" src="/js/torrent-list.js"></script>
+  <script type="module" src="/js/file-browser.js"></script>
+  <script type="module">
+    const loginView = document.getElementById('login-view');
+    const appView = document.getElementById('app-view');
+
+    function showApp() {
+      loginView.hidden = true;
+      appView.hidden = false;
+      document.querySelector('category-tree').load();
+      document.querySelector('torrent-list').start();
+    }
+    function showLogin() {
+      appView.hidden = true;
+      loginView.hidden = false;
+      document.querySelector('torrent-list').stop();
+    }
+
+    document.addEventListener('auth-ok', showApp);
+    document.addEventListener('auth-required', showLogin);
+    document.addEventListener('logout', () => { location.reload(); });
+
+    // навигация: торренты / файлы
+    document.addEventListener('nav', (e) => {
+      document.getElementById('torrents-view').hidden = e.detail.view !== 'torrents';
+      document.getElementById('files-view').hidden = e.detail.view !== 'files';
+      if (e.detail.view === 'files') document.querySelector('file-browser').load();
+    });
+    // фильтр по категории
+    document.addEventListener('category-selected', (e) => {
+      document.querySelector('torrent-list').setCategory(e.detail.name);
+    });
+  </script>
+</body>
+</html>
