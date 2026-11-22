@@ -18,7 +18,9 @@ async function req(method, url, body, raw = false) {
     const text = await r.text();
     throw new Error(text || r.status);
   }
-  return raw ? r : r.json();
+  if (raw) return r;
+  const ct = r.headers.get('content-type') || '';
+  return ct.includes('json') ? r.json() : r.text();
 }
 
 export const api = {
